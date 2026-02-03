@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional
 from ports.interfaces import AIModelPort, SecurityPort, PersistencePort
 from core.exceptions import transientAPIError, PermanentAPIError, NoContextError
 
-# Configuração de logging profissional
+# Configuração de logging global
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -14,11 +14,27 @@ logging.basicConfig(
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("google_genai").setLevel(logging.WARNING)
 logging.getLogger("telegram").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 logger = logging.getLogger("VisionService")
 
 class VisionService:
+    """
+    Cérebro da aplicação Amélie (Core Service).
+    
+    Orquestra a lógica de negócio, gerencia filas de processamento,
+    garante a acessibilidade das respostas e coordena a blindagem de dados.
+    """
+
     def __init__(self, ai_model: AIModelPort, security: SecurityPort, persistence: PersistencePort):
+        """
+        Inicializa o serviço com seus respectivos componentes injetados.
+
+        Args:
+            ai_model (AIModelPort): Adaptador da IA.
+            security (SecurityPort): Adaptador de criptografia.
+            persistence (PersistencePort): Adaptador de banco de dados.
+        """
         self.ai_model = ai_model
         self.security = security
         self.persistence = persistence
@@ -26,11 +42,13 @@ class VisionService:
         self.worker_task = None
 
     def start_worker(self):
+        """Inicia o processador de fila em background (Lazy Load)."""
         if self.worker_task is None:
-            logger.info("Iniciando worker blindado...")
+            logger.info("Worker blindado da Amélie iniciado.")
             self.worker_task = asyncio.create_task(self._worker())
 
     async def _worker(self):
+        """Processa pedidos um por um para evitar sobrecarga da API."""
         while True:
             request = await self.queue.get()
             chat_id, func, args, future = request
@@ -44,24 +62,36 @@ class VisionService:
                 await asyncio.sleep(0.5)
 
     def _clean_text_for_accessibility(self, text: str) -> str:
+        """Remove caracteres de Markdown (*, #, _, `) para leitores de tela."""
         text = text.replace("*", "").replace("#", "").replace("_", " ").replace("`", "")
         text = re.sub(r' +', ' ', text)
         return text.strip()
 
     async def _enqueue_request(self, chat_id: str, func, *args):
+        """Gerencia a entrada e espera de resultados na fila global."""
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         await self.queue.put((chat_id, func, args, future))
         return await future
 
     async def process_file_request(self, chat_id: str, content_bytes: bytes, mime_type: str) -> str:
+        """
+        Lida com um novo arquivo: faz upload, criptografa a URI e gera a análise inicial.
+
+        Args:
+            chat_id: ID do usuário.
+            content_bytes: Arquivo recebido.
+            mime_type: Tipo do arquivo.
+        """
         logger.info(f"Recebido. Tipo: {mime_type} | Chat: {chat_id}")
         
+        # Limpa sessão anterior se existir
         old_session = await self.persistence.get_session(chat_id)
         if old_session:
             old_uri = self.security.decrypt(old_session["uri"])
             asyncio.create_task(self.ai_model.delete_file(old_uri))
 
+        # Upload e Criptografia
         file_uri = await self._enqueue_request(chat_id, self.ai_model.upload_file, content_bytes, mime_type)
         encrypted_uri = self.security.encrypt(file_uri)
         
@@ -72,22 +102,18 @@ class VisionService:
         }
         await self.persistence.save_session(chat_id, new_session)
         
-        # Determina o prompt inicial baseado nas preferências do usuário
+        # Determina prompt inicial baseado em preferências
         style = await self.persistence.get_preference(chat_id, "style") or "longo"
         
         if mime_type.startswith("image/"):
-            if style == "curto":
-                prompt = "Descreva esta imagem de forma muito breve para um cego (máximo 200 letras)."
-            else:
-                prompt = "Descreva esta imagem detalhadamente para um cego."
+            prompt = "Descreva esta imagem de forma muito breve (200 letras)." if style == "curto" else "Descreva detalhadamente."
         elif mime_type.startswith("video/"):
             video_mode = await self.persistence.get_preference(chat_id, "video_mode") or "completo"
-            if video_mode == "legenda":
-                prompt = "Crie legendas para este vídeo, descrevendo o que acontece em cada momento."
-            else:
-                prompt = "Descreva este vídeo detalhadamente de forma cronológica para um cego."
+            prompt = "Crie legendas cronológicas." if video_mode == "legenda" else "Descreva detalhadamente o vídeo."
+        elif mime_type.startswith("audio/"):
+            prompt = "Transcreva e analise este áudio detalhadamente."
         elif mime_type == "application/pdf":
-            prompt = "Resuma este PDF de forma simples para um cego."
+            prompt = "Resuma este PDF de forma simples."
         else:
             prompt = "Analise este documento."
 
@@ -96,9 +122,10 @@ class VisionService:
         return result
 
     async def process_question_request(self, chat_id: str, question: str) -> str:
+        """Processa uma pergunta sobre o arquivo salvo no cache criptografado."""
         session = await self.persistence.get_session(chat_id)
         if not session:
-            raise NoContextError("Nenhum arquivo no cache.")
+            raise NoContextError("Sem contexto.")
         
         real_uri = self.security.decrypt(session["uri"])
         real_history = []
@@ -108,49 +135,35 @@ class VisionService:
                 "parts": [self.security.decrypt(p) for p in h["parts"]]
             })
 
-        logger.info(f"Processando pergunta contextual (Chat: {chat_id})")
+        logger.info(f"Pergunta sobre cache (Chat: {chat_id})")
         
         raw_result = await self._enqueue_request(
-            chat_id, 
-            self.ai_model.ask_about_file,
-            real_uri, 
-            session["mime"], 
-            question,
-            real_history
+            chat_id, self.ai_model.ask_about_file, real_uri, session["mime"], question, real_history
         )
 
         clean_result = self._clean_text_for_accessibility(raw_result)
         
-        new_history_entry_user = {"role": "user", "parts": [self.security.encrypt(question)]}
-        new_history_entry_model = {"role": "model", "parts": [self.security.encrypt(clean_result)]}
-        
-        session["history"].append(new_history_entry_user)
-        session["history"].append(new_history_entry_model)
+        # Salva histórico criptografado
+        session["history"].append({"role": "user", "parts": [self.security.encrypt(question)]})
+        session["history"].append({"role": "model", "parts": [self.security.encrypt(clean_result)]})
         
         await self.persistence.save_session(chat_id, session)
-        logger.info(f"Processado. Chat: {chat_id}")
         return clean_result
 
     async def process_command(self, chat_id: str, command: str) -> str:
+        """Gerencia comandos de sistema e preferências do usuário."""
         if command == "/ajuda":
-            return (
-                "Comandos disponíveis:\n"
-                "/ajuda - Mostra esta mensagem\n"
-                "/curto - Audiodescrições curtas (até 200 letras)\n"
-                "/longo - Audiodescrições completas e detalhadas\n"
-                "/legenda - O vídeo gera uma legenda cronológica\n"
-                "/completo - O vídeo é descrito de forma detalhada"
-            )
+            return "Amélie: Enviei mídias para audiodescrição ou documentos para análise. Comandos: /curto, /longo, /legenda, /completo."
         elif command == "/curto":
             await self.persistence.save_preference(chat_id, "style", "curto")
-            return "Estilo definido como: Curto."
+            return "Estilo: Curto definido."
         elif command == "/longo":
             await self.persistence.save_preference(chat_id, "style", "longo")
-            return "Estilo definido como: Longo."
+            return "Estilo: Longo definido."
         elif command == "/legenda":
             await self.persistence.save_preference(chat_id, "video_mode", "legenda")
-            return "Modo de vídeo definido como: Legenda."
+            return "Vídeo: Modo legenda definido."
         elif command == "/completo":
             await self.persistence.save_preference(chat_id, "video_mode", "completo")
-            return "Modo de vídeo definido como: Completo."
+            return "Vídeo: Modo completo definido."
         return "Comando desconhecido."

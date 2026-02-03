@@ -9,7 +9,21 @@ from core.exceptions import NoContextError
 logger = logging.getLogger("TelegramAdapter")
 
 class TelegramAdapter(MessagingPort):
+    """
+    Adaptador para a plataforma Telegram utilizando python-telegram-bot.
+    
+    Gerencia a recepção de mídias, textos e comandos, coordenando
+    o download e o envio de respostas para o usuário.
+    """
+
     def __init__(self, token: str, vision_service: VisionService):
+        """
+        Inicializa a aplicação do Telegram.
+
+        Args:
+            token (str): Token do bot fornecido pelo BotFather.
+            vision_service (VisionService): Instância do serviço core.
+        """
         self.token = token
         self.vision_service = vision_service
         self.app = ApplicationBuilder().token(token).read_timeout(30).write_timeout(30).build()
@@ -24,12 +38,20 @@ class TelegramAdapter(MessagingPort):
         }
 
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Processa comandos de barra (ex: /ajuda, /curto)."""
         chat_id = str(update.effective_chat.id)
         command = update.message.text.split()[0].lower()
         result = await self.vision_service.process_command(chat_id, command)
         await update.message.reply_text(result)
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """
+        Handler central para todas as mensagens (mídia e texto).
+        
+        Identifica o tipo de conteúdo, baixa arquivos se necessário e
+        encaminha para o VisionService via fila de processamento.
+        """
+        # Inicia o worker assíncrono se for o primeiro contato
         self.vision_service.start_worker()
         
         if not update.message: return
@@ -39,7 +61,7 @@ class TelegramAdapter(MessagingPort):
         file_to_download = None
         mime_type = None
 
-        # Identificação de mídia
+        # Roteamento baseado no tipo de mensagem
         if message.photo:
             file_to_download = await message.photo[-1].get_file()
             mime_type = "image/jpeg"
@@ -64,6 +86,7 @@ class TelegramAdapter(MessagingPort):
                 if "audio" not in raw_mime: mime_type = "audio/mpeg" 
             if mime_type: file_to_download = await message.document.get_file()
 
+        # Fluxo de processamento de arquivo
         if file_to_download:
             try:
                 content_bytes = await file_to_download.download_as_bytearray()
@@ -73,6 +96,7 @@ class TelegramAdapter(MessagingPort):
                 logger.error(f"Erro no processamento de arquivo: {e}", exc_info=True)
             return
 
+        # Fluxo de pergunta textual (Contextual)
         if message.text:
             try:
                 result = await self.vision_service.process_question_request(chat_id, message.text)
@@ -82,23 +106,28 @@ class TelegramAdapter(MessagingPort):
             except Exception as e:
                 logger.error(f"Erro na pergunta contextual: {e}", exc_info=True)
 
-    async def _send_long_message(self, update, text):
+    async def _send_long_message(self, update: Update, text: str):
+        """Divide mensagens longas (>4k chars) para respeitar limites do Telegram."""
         MAX_LENGTH = 4000
         for i in range(0, len(text), MAX_LENGTH):
             chunk = text[i:i + MAX_LENGTH]
             if chunk.strip(): await update.message.reply_text(chunk)
 
     def start(self):
-        # Comandos
+        """Configura handlers e inicia o polling do bot."""
+        # Registra comandos
         self.app.add_handler(CommandHandler(["ajuda", "curto", "longo", "legenda", "completo"], self._handle_command))
-        # Geral
+        
+        # Registra mensagens gerais (Mídia + Texto puro)
         handler = MessageHandler(
             filters.PHOTO | filters.VIDEO | filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.TEXT & (~filters.COMMAND), 
             self._handle_message
         )
         self.app.add_handler(handler)
-        logger.info("Bot iniciado com comandos e persistência de preferências.")
+        
+        logger.info("Bot Amélie iniciado no Telegram.")
         self.app.run_polling()
 
     async def send_message(self, chat_id: str, text: str):
+        """Envio direto de mensagem via API."""
         await self.app.bot.send_message(chat_id=chat_id, text=text)
