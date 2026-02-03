@@ -1,23 +1,15 @@
 import re
 import logging
 from ports.interfaces import AIModelPort
-from core.exceptions import VisionBotError, transientAPIError, PermanentAPIError
-
-# Configuração básica de logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-# Silenciar logs excessivos de bibliotecas externas
-logging.getLogger("httpx").setLevel(logging.WARNING)
-logging.getLogger("google_genai").setLevel(logging.WARNING)
-logging.getLogger("telegram").setLevel(logging.WARNING)
+from core.exceptions import VisionBotError, transientAPIError, PermanentAPIError, NoContextError
 
 logger = logging.getLogger("VisionService")
 
 class VisionService:
     def __init__(self, ai_model: AIModelPort):
         self.ai_model = ai_model
+        # Memória de sessão: chat_id -> {file_bytes, mime_type, history}
+        self.sessions = {}
 
     def _clean_text_for_accessibility(self, text: str) -> str:
         text = text.replace("*", "")
@@ -27,32 +19,50 @@ class VisionService:
         text = re.sub(r' +', ' ', text)
         return text.strip()
 
-    async def process_file_request(self, content_bytes: bytes, mime_type: str) -> str:
+    async def process_file_request(self, chat_id: str, content_bytes: bytes, mime_type: str) -> str:
+        # Novo arquivo inicia uma nova sessão para aquele chat
+        self.sessions[chat_id] = {
+            "bytes": content_bytes,
+            "mime": mime_type,
+            "history": []
+        }
+        
+        # Prompt inicial baseado no tipo
+        if mime_type.startswith("image/"): prompt = "Descreva esta imagem para um cego."
+        elif mime_type.startswith("video/"): prompt = "Descreva este vídeo cronologicamente para um cego."
+        elif mime_type == "application/pdf": prompt = "Resuma este PDF de forma simples para um cego."
+        else: prompt = "Analise este documento."
+
+        return await self._ask_ai(chat_id, prompt)
+
+    async def process_question_request(self, chat_id: str, question: str) -> str:
+        if chat_id not in self.sessions:
+            raise NoContextError("Nenhum arquivo enviado anteriormente.")
+        
+        return await self._ask_ai(chat_id, question)
+
+    async def _ask_ai(self, chat_id: str, prompt: str) -> str:
+        session = self.sessions[chat_id]
+        
         try:
-            logger.info(f"Processando arquivo do tipo: {mime_type}")
-            raw_result = await self.ai_model.process_content(content_bytes, mime_type)
+            # Instrução de acessibilidade sempre presente
+            full_prompt = f"{prompt}. Responda em português, texto puro, sem qualquer markdown ou asteriscos."
+            
+            raw_result = await self.ai_model.process_content(
+                session["bytes"], 
+                session["mime"], 
+                full_prompt,
+                session["history"]
+            )
+            
             clean_result = self._clean_text_for_accessibility(raw_result)
             
-            if mime_type.startswith("image/"):
-                prefix = "Audiodescrição de imagem"
-            elif mime_type.startswith("video/"):
-                prefix = "Audiodescrição de vídeo"
-            elif mime_type == "application/pdf":
-                prefix = "Análise de PDF"
-            else:
-                prefix = "Análise de Documento"
+            # Atualiza o histórico para manter o contexto da conversa
+            session["history"].append({"role": "user", "parts": [prompt]})
+            session["history"].append({"role": "model", "parts": [clean_result]})
             
-            logger.info(f"Processamento concluído com sucesso para o tipo: {mime_type}")
-            return f"{prefix}: {clean_result}"
+            return clean_result
 
-        except transientAPIError as e:
-            logger.warning(f"Erro temporário detectado: {e}")
-            return "O sistema está um pouco instável no momento. Tentei processar três vezes, mas o servidor do Google não respondeu. Por favor, tente novamente em alguns instantes."
-        
-        except PermanentAPIError as e:
-            logger.error(f"Erro permanente detectado: {e}")
-            return "Desculpe, ocorreu um problema técnico na minha configuração que me impede de responder agora. Meu administrador já foi notificado."
-        
         except Exception as e:
-            logger.critical(f"Erro inesperado: {e}", exc_info=True)
-            return "Ocorreu um erro inesperado ao processar seu arquivo. Por favor, tente novamente mais tarde."
+            logger.error(f"Erro na sessão {chat_id}: {e}")
+            raise e

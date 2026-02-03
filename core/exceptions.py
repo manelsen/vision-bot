@@ -17,3 +17,7 @@ class FileTooLargeError(VisionBotError):
 class UnsupportedFormatError(VisionBotError):
     """Format not supported by the model"""
     pass
+
+class NoContextError(VisionBotError):
+    """User asked a question without sending a file first"""
+    pass

@@ -11,5 +11,5 @@ class MessagingPort(ABC):
 
 class AIModelPort(ABC):
     @abstractmethod
-    async def process_content(self, content_bytes: bytes, mime_type: str) -> str:
+    async def process_content(self, content_bytes: bytes, mime_type: str, prompt: str, history: list = None) -> str:
         pass
