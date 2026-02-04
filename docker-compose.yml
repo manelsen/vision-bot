@@ -1,14 +1,19 @@
 services:
-  vision-bot:
+  amelie:
     build: .
-    container_name: vision-bot
+    container_name: amelie-bot
     restart: always
     env_file:
       - .env
+    environment:
+      - TZ=America/Sao_Paulo
     volumes:
-      - ./bot_data.db:/app/bot_data.db
+      - .:/app
+      - /app/venv
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
     logging:
       driver: "json-file"
       options:
-        max-size: "10mb"
+        max-size: "10m"
         max-file: "3"

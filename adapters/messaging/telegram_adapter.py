@@ -11,25 +11,25 @@ logger = logging.getLogger("TelegramAdapter")
 
 class TelegramAdapter(MessagingPort):
     """
-    Adaptador de interface para o Telegram utilizando a biblioteca python-telegram-bot.
+    Adaptador para a plataforma Telegram (python-telegram-bot).
     
-    Implementa a interface MessagingPort para gerenciar mensagens, mídias
-    diversas e fluxos interativos de consentimento da LGPD.
+    Implementa a interface MessagingPort, traduzindo eventos do Telegram 
+    (mensagens, fotos, documentos, comandos) para chamadas no VisionService 
+    e vice-versa. Gerencia a detecção de tipos MIME e limites de tamanho de arquivo.
     """
 
     def __init__(self, token: str, vision_service: VisionService):
         """
-        Inicializa a aplicação do Telegram e configura os tipos de mídia suportados.
+        Inicializa a aplicação Telegram e configura os tipos de mídia suportados.
 
         Args:
-            token (str): Token de acesso do Bot (via BotFather).
-            vision_service (VisionService): Instância do serviço de domínio.
+            token (str): Token do bot fornecido pelo BotFather.
+            vision_service (VisionService): Instância do serviço central.
         """
         self.token = token
         self.vision_service = vision_service
         self.app = ApplicationBuilder().token(token).read_timeout(30).write_timeout(30).build()
         
-        # Limite máximo para download de arquivos via Bot API (20MB)
         self.MAX_FILE_SIZE = 20 * 1024 * 1024 
         
         self.supported_mimetypes = {
@@ -55,11 +55,8 @@ class TelegramAdapter(MessagingPort):
 
     async def _handle_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        Processa comandos de barra e gerencia o fluxo de aviso da LGPD.
-
-        Args:
-            update (Update): Objeto de atualização do Telegram.
-            context (ContextTypes.DEFAULT_TYPE): Contexto da aplicação.
+        Processa comandos iniciados por '/' (ex: /start, /ajuda).
+        Traduz comandos para ações ou alterações de preferências no VisionService.
         """
         chat_id = str(update.effective_chat.id)
         command = update.message.text.split()[0].lower()
@@ -74,26 +71,21 @@ class TelegramAdapter(MessagingPort):
 
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        Interpreta interações em botões Inline (ex: aceite dos termos).
-
-        Args:
-            update (Update): Atualização contendo o callback query.
-            context (ContextTypes.DEFAULT_TYPE): Contexto da aplicação.
+        Gerencia cliques em botões Inline (Interações de Callback).
+        Utilizado principalmente para aceitação dos termos de privacidade.
         """
         query = update.callback_query
         await query.answer()
         if query.data == 'accept_lgpd':
             chat_id = str(update.effective_chat.id)
             await self.vision_service.accept_terms(chat_id)
-            await query.edit_message_text(text="Obrigada por confiar na Amélie! 🌸 Agora você já pode me enviar arquivos para análise.")
+            await query.edit_message_text(text="Obrigada por confiar na Amélie! 🌸 Envie uma mídia com ou sem legenda para começar.")
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """
-        Handler central para o fluxo de mensagens de mídia e texto contextual.
-
-        Args:
-            update (Update): Atualização contendo a mensagem do usuário.
-            context (ContextTypes.DEFAULT_TYPE): Contexto da aplicação.
+        Handler central para todas as mensagens não-comando.
+        Identifica o tipo de mídia, baixa o conteúdo e encaminha para processamento.
+        Ignora textos puros para forçar o uso de mídias para audiodescrição.
         """
         self.vision_service.start_worker()
         if not update.message: return
@@ -103,7 +95,7 @@ class TelegramAdapter(MessagingPort):
         media_obj = None
         mime_type = None
 
-        # Roteamento e identificação de mídia com validação de tipo
+        # Identificação de mídia
         if message.photo:
             media_obj = message.photo[-1]
             mime_type = "image/jpeg"
@@ -128,55 +120,47 @@ class TelegramAdapter(MessagingPort):
             if raw_mime in self.supported_mimetypes: mime_type = self.supported_mimetypes[raw_mime]
             elif file_name.endswith(".md"): mime_type = "text/markdown"
             elif file_name.endswith(".pdf"): mime_type = "application/pdf"
-            elif file_name.endswith(".csv"): mime_type = "text/csv"
-            elif file_name.endswith(".txt"): mime_type = "text/plain"
-            elif file_name.endswith(".html"): mime_type = "text/html"
-            elif file_name.endswith(".xml"): mime_type = "text/xml"
-            elif file_name.endswith((".mp3", ".wav", ".ogg", ".flac", ".aac", ".aiff")): mime_type = "audio/mpeg"
-            elif file_name.endswith((".mp4", ".mov", ".avi", ".webm")): mime_type = "video/mp4"
             if mime_type: media_obj = message.document
 
-        # Processamento de download e encaminhamento para o Core
         if media_obj:
             if media_obj.file_size > self.MAX_FILE_SIZE:
                 await update.message.reply_text("Arquivo excede o limite de 20MB.")
                 return
             try:
+                # Pega o texto da legenda se houver
+                caption = message.caption
+                
                 file_to_download = await media_obj.get_file()
                 content_bytes = await file_to_download.download_as_bytearray()
-                result = await self.vision_service.process_file_request(chat_id, bytes(content_bytes), mime_type)
+                
+                # Envia o arquivo e a legenda opcional
+                result = await self.vision_service.process_file_request(chat_id, bytes(content_bytes), mime_type, caption)
+                
                 if result == "POR_FAVOR_ACEITE_TERMOS":
                     await update.message.reply_text("Aceite os termos da LGPD digitando /start antes de começar.")
                 else:
                     await self._send_long_message(update, result)
             except telegram.error.BadRequest as e:
                 if "File is too big" in str(e):
-                    await update.message.reply_text("O Telegram impediu o download deste arquivo por ser muito grande.")
-                else: logger.error(f"Telegram BadRequest: {e}")
+                    await update.message.reply_text("O Telegram impediu o download do arquivo.")
+                else: logger.error(f"BadRequest: {e}")
             except Exception as e:
-                logger.error(f"Erro no processamento de mídia: {e}", exc_info=True)
+                logger.error(f"Erro no processamento: {e}", exc_info=True)
             return
 
-        # Tratamento de perguntas textuais (contexto da última mídia)
-        if message.text:
-            try:
-                result = await self.vision_service.process_question_request(chat_id, message.text)
-                if result == "POR_FAVOR_ACEITE_TERMOS":
-                    await update.message.reply_text("Por favor, aceite os termos da LGPD no comando /start primeiro.")
-                else:
-                    await self._send_long_message(update, result)
-            except NoContextError:
-                await update.message.reply_text("Envie um arquivo primeiro para começarmos.")
-            except Exception as e:
-                logger.error(f"Erro na interação textual: {e}", exc_info=True)
+        # Mensagens apenas de texto (sem mídia) são ignoradas com aviso
+        if message.text and not message.text.startswith('/'):
+            await update.message.reply_text(
+                "A Amélie precisa de uma mídia para ajudar. 👁️🌸\n\n"
+                "1. Envie uma foto, vídeo, áudio ou PDF.\n"
+                "2. Se tiver uma pergunta, escreva-a na **legenda** do arquivo.\n\n"
+                "Eu não consigo responder a perguntas enviadas separadamente."
+            )
 
     async def _send_long_message(self, update: Update, text: str):
         """
-        Garante a entrega de respostas extensas dividindo-as em chunks aceitáveis.
-
-        Args:
-            update (Update): Objeto de atualização para resposta.
-            text (str): Conteúdo total a ser enviado.
+        Divide mensagens longas em fragmentos menores para evitar o limite do Telegram 
+        e garantir que leitores de tela processem o texto em partes navegáveis.
         """
         MAX_LENGTH = 4000
         for i in range(0, len(text), MAX_LENGTH):
@@ -184,30 +168,36 @@ class TelegramAdapter(MessagingPort):
             if chunk.strip(): await update.message.reply_text(chunk)
 
     async def _setup_commands(self):
-        """Configura dinamicamente o menu de comandos rápidos no cliente Telegram."""
+        """Configura os comandos que aparecem no botão 'Menu' do Telegram."""
         commands = [
             BotCommand("start", "Iniciar Amélie e aceitar termos"),
-            BotCommand("ajuda", "Ver manual de uso"),
-            BotCommand("curto", "Imagem: Audiodescrição breve"),
-            BotCommand("longo", "Imagem: Audiodescrição detalhada"),
-            BotCommand("legenda", "Vídeo: Transcrição verbatim"),
-            BotCommand("completo", "Vídeo: Descrição narrativa")
+            BotCommand("ajuda", "Manual de uso"),
+            BotCommand("curto", "Audiodescrição breve"),
+            BotCommand("longo", "Audiodescrição detalhada"),
+            BotCommand("legenda", "Vídeo: Transcrição áudio"),
+            BotCommand("completo", "Vídeo: Descrição visual")
         ]
         await self.app.bot.set_my_commands(commands)
 
     def start(self):
-        """Registra os handlers e inicia o ciclo de polling do bot."""
-        loop = asyncio.get_event_loop()
-        loop.create_task(self._setup_commands())
+        """Inicia o bot e configura os handlers."""
+        # Adiciona handlers de comandos
         self.app.add_handler(CommandHandler(["start", "ajuda", "curto", "longo", "legenda", "completo"], self._handle_command))
+        
+        # Adiciona handler de callback (botões)
         self.app.add_handler(CallbackQueryHandler(self._handle_callback))
+        
+        # Adiciona handler de mensagens gerais (mídias, stickers e textos)
         self.app.add_handler(MessageHandler(
             filters.PHOTO | filters.VIDEO | filters.VOICE | filters.AUDIO | filters.Document.ALL | filters.Sticker.ALL | filters.TEXT & (~filters.COMMAND), 
             self._handle_message
         ))
-        logger.info("Bot Amélie operando no Telegram.")
-        self.app.run_polling()
+        
+        # Configura os comandos no menu do bot
+        loop = asyncio.get_event_loop()
+        loop.create_task(self._setup_commands())
+        
+        logger.info("Bot Amélie operando.")
 
     async def send_message(self, chat_id: str, text: str):
-        """Implementação da interface de envio direto de mensagens."""
         await self.app.bot.send_message(chat_id=chat_id, text=text)

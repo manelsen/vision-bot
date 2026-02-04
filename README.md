@@ -1,50 +1,54 @@
-# Vision Bot para Deficientes Visuais (Amélie) 👁️🤖
+# Amélie 👁️🌸
 
-Um bot multimodal para Telegram construído com **Arquitetura Hexagonal**, focado em acessibilidade e privacidade.
+A **Amélie** é uma assistente multimodal de audiodescrição desenvolvida para promover a acessibilidade de pessoas com deficiência visual. Utilizando a inteligência do Google Gemini, ela transforma fotos, vídeos, áudios e documentos em descrições detalhadas e acessíveis via Telegram.
 
-## Nome do Projeto: Amélie
-O nome é uma homenagem à sensibilidade e à capacidade de enxergar a beleza nos pequenos detalhes.
+## 🚀 Como Rodar (via Docker)
 
-## Funcionalidades
-- **Audiodescrição:** Imagens e vídeos processados pelo Gemini 2.5 Flash Lite.
-- **Análise de Documentos:** Suporte para PDF e Markdown.
-- **Sessões Contextuais:** Pergunte detalhes sobre o último arquivo enviado.
-- **Acessibilidade Total:** Respostas em português, texto puro, sem Markdown ou asteriscos.
-- **Privacidade (Blindagem):** Banco de dados SQLite criptografado com AES-256 (Ponta-a-ponta na infraestrutura).
-- **Resiliência:** Sistema de fila global e retentativas automáticas.
+A forma mais simples e recomendada de rodar a Amélie é utilizando Docker.
 
-## Como Instalar
+### Pré-requisitos
+- Docker e Docker Compose instalados.
+- Um token de bot do Telegram (via [@BotFather](https://t.me/botfather)).
+- Uma chave de API do Google Gemini (via [Google AI Studio](https://aistudio.google.com/)).
 
-### 1. Requisitos
-- Docker e Docker Compose (Recomendado) **OU** Python 3.12+
+### Passo a Passo
 
-### 2. Configuração
-1. Clone o repositório.
-2. Copie o arquivo `.env.example` para `.env`:
+1. **Clone o repositório:**
+   ```bash
+   git clone https://github.com/seu-usuario/vision-bot.git
+   cd vision-bot
+   ```
+
+2. **Configure as variáveis de ambiente:**
+   Copie o arquivo de exemplo e preencha com suas chaves:
    ```bash
    cp .env.example .env
+   nano .env
    ```
-3. Edite o `.env` e insira seu `TELEGRAM_TOKEN` e sua `GEMINI_API_KEY`.
-   - *Nota: A `SECURITY_KEY` será gerada automaticamente no primeiro boot.*
 
-### 3. Rodando com Docker (Recomendado)
+3. **Suba o container:**
+   ```bash
+   docker compose up -d --build
+   ```
+
+A Amélie agora está no ar! Você pode acompanhar os logs com:
 ```bash
-docker-compose up -d --build
+docker compose logs -f
 ```
 
-### 4. Rodando manualmente (venv)
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-python main.py
-```
+## 🛠️ Comandos Suportados
+- `/start` - Inicia o bot e apresenta os termos de privacidade.
+- `/ajuda` - Exibe o manual de uso.
+- `/curto` | `/longo` - Define o nível de detalhamento das imagens.
+- `/legenda` | `/completo` - Define o modo de análise de vídeos.
 
-## Arquitetura
-O projeto segue os princípios de **Clean Architecture / Hexagonal**:
-- **Core:** Lógica de negócio e orquestração de sessões.
-- **Ports:** Interfaces que definem os contratos do sistema.
-- **Adapters:** Implementações tecnológicas (Telegram, Gemini, SQLite, Fernet).
+## 🔒 Privacidade e Acessibilidade
+- **Cegueira do Gestor:** Arquivos são processados e deletados imediatamente após a resposta.
+- **Texto Puro:** Todas as respostas são limpas de Markdown complexo para garantir fluidez em leitores de tela (TalkBack/NVDA).
+- **Sem Memória:** Para garantir a privacidade, a Amélie não mantém histórico de conversas anteriores; cada mídia é tratada como um evento único.
 
-## Licença
-Este projeto é Open Source e distribuído sob a licença MIT.
+## 🏗️ Arquitetura
+O projeto utiliza **Arquitetura Hexagonal**, permitindo que a inteligência central seja independente de adaptadores externos como o Telegram ou o SQLite.
+
+---
+*Amélie: Enxergando a beleza nos pequenos detalhes.*

@@ -1,6 +1,20 @@
-venv/
-.env
+# Python
 __pycache__/
-*.log
+*.py[cod]
+*$py.class
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# Database
 *.db
+*.db-journal
+
+# Docker
+.docker_temp/
+
+# Logs
+*.log
 bot_data.db
